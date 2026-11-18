@@ -1,14 +1,24 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  BrowserRouter,
+  Navigate,
+  NavLink,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+} from 'react-router-dom';
 import type {
-  DashboardOverviewResponse,
+  BasePageResponse,
   StoredWebhookEvent,
   TimeRange,
 } from './types/aimfox';
-import { OverviewView } from './components/OverviewView';
-import { UserPerformanceView } from './components/UserPerformanceView';
-import { CampaignsTemplatesView } from './components/CampaignsTemplatesView';
-import { LeadsConversationsView } from './components/LeadsConversationsView';
-import { WebhooksVueView } from './components/WebhooksVueView';
+import { clearAllClientCache } from './lib/swrCache';
+import { OverviewPage } from './pages/OverviewPage';
+import { UsersPage } from './pages/UsersPage';
+import { CampaignsPage } from './pages/CampaignsPage';
+import { LeadsPage } from './pages/LeadsPage';
+import { WebhooksPage } from './pages/WebhooksPage';
 import {
   Activity,
   BarChart3,
@@ -21,65 +31,33 @@ import {
   X,
 } from 'lucide-react';
 
-type NavTab = 'overview' | 'users' | 'campaigns' | 'leads' | 'webhooks';
-
-const NAV_ITEMS: Array<{ id: NavTab; label: string; icon: typeof BarChart3 }> = [
-  { id: 'overview', label: 'Overview', icon: BarChart3 },
-  { id: 'users', label: 'User Performance', icon: Users },
-  { id: 'campaigns', label: 'Campaigns', icon: Layers },
-  { id: 'leads', label: 'Leads & Inbox', icon: Activity },
-  { id: 'webhooks', label: 'Webhooks & Vue', icon: Webhook },
+const NAV_ITEMS = [
+  { to: '/overview', label: 'Overview', icon: BarChart3 },
+  { to: '/users', label: 'User Performance', icon: Users },
+  { to: '/campaigns', label: 'Campaigns', icon: Layers },
+  { to: '/leads', label: 'Leads & Inbox', icon: Activity },
+  { to: '/webhooks', label: 'Webhooks & Vue', icon: Webhook },
 ];
 
-export default function App() {
-  const [activeTab, setActiveTab] = useState<NavTab>('overview');
+function DashboardShell() {
+  const location = useLocation();
+  const navigate = useNavigate();
+
   const [range, setRange] = useState<TimeRange>('30d');
   const [accountId, setAccountId] = useState<string>('all');
   const [campaignId, setCampaignId] = useState<string>('all');
-  const [data, setData] = useState<DashboardOverviewResponse | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [meta, setMeta] = useState<BasePageResponse | null>(null);
   const [syncing, setSyncing] = useState<boolean>(false);
-  const [testingWebhook, setTestingWebhook] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
+  const [syncEpoch, setSyncEpoch] = useState<number>(0);
+  const [latestWebhook, setLatestWebhook] = useState<StoredWebhookEvent | null>(null);
   const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'polling' | 'reconnecting'>('connecting');
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
 
-  const rangeRef = useRef(range);
-  const accountRef = useRef(accountId);
-  const campaignRef = useRef(campaignId);
-  rangeRef.current = range;
-  accountRef.current = accountId;
-  campaignRef.current = campaignId;
+  const handleMetaUpdate = useCallback((nextMeta: BasePageResponse) => {
+    setMeta(nextMeta);
+  }, []);
 
-  const fetchOverview = useCallback(
-    async (opts?: { force?: boolean; silent?: boolean }) => {
-      if (!opts?.silent) setLoading(true);
-      setError(null);
-      try {
-        const params = new URLSearchParams({
-          range: rangeRef.current,
-          accountId: accountRef.current,
-          campaignId: campaignRef.current,
-        });
-        if (opts?.force) params.set('force', 'true');
-        const res = await fetch(`/api/dashboard/overview?${params.toString()}`);
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.error || 'Failed to load Aimfox analytics');
-        setData(json as DashboardOverviewResponse);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Unable to reach Aimfox API');
-      } finally {
-        setLoading(false);
-      }
-    },
-    [],
-  );
-
-  useEffect(() => {
-    fetchOverview();
-  }, [range, accountId, campaignId, fetchOverview]);
-
-  // Real-time stream: uses WebSocket on Node server, clean HTTP polling on serverless (Vercel)
+  // Real-time stream: WebSocket on Node server, clean 10s polling on serverless (Vercel)
   useEffect(() => {
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -95,11 +73,11 @@ export default function App() {
           const res = await fetch('/api/webhooks/events');
           if (!res.ok) return;
           const json = (await res.json()) as { events?: StoredWebhookEvent[] };
-          if (Array.isArray(json.events)) {
-            setData((prev) => (prev ? { ...prev, webhookEvents: json.events! } : prev));
+          if (Array.isArray(json.events) && json.events[0]) {
+            setLatestWebhook(json.events[0]);
           }
         } catch {
-          // ignore transient poll failures
+          // ignore transient poll errors
         }
       }, 10_000);
     };
@@ -118,23 +96,14 @@ export default function App() {
         try {
           const msg = JSON.parse(event.data) as { type: string; payload: unknown };
           if (msg.type === 'webhook:received') {
-            const incoming = msg.payload as StoredWebhookEvent;
-            setData((prev) => {
-              if (!prev) return prev;
-              const exists = prev.webhookEvents.some((e) => e.id === incoming.id);
-              if (exists) return prev;
-              return {
-                ...prev,
-                webhookEvents: [incoming, ...prev.webhookEvents].slice(0, 200),
-              };
-            });
+            setLatestWebhook(msg.payload as StoredWebhookEvent);
           } else if (
             msg.type === 'dashboard:synced' ||
             msg.type === 'campaign:updated' ||
-            msg.type === 'webhooks:changed' ||
-            msg.type === 'webhooks:cleared'
+            msg.type === 'webhooks:changed'
           ) {
-            fetchOverview({ silent: true });
+            clearAllClientCache();
+            setSyncEpoch((n) => n + 1);
           }
         } catch {
           // ignore malformed messages
@@ -175,54 +144,16 @@ export default function App() {
       if (pollTimer) clearInterval(pollTimer);
       ws?.close();
     };
-  }, [fetchOverview]);
+  }, []);
 
   const handleManualSync = async () => {
     setSyncing(true);
-    setError(null);
     try {
-      const res = await fetch('/api/dashboard/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ range, accountId, campaignId }),
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || 'Sync failed');
-      setData(json as DashboardOverviewResponse);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Sync failed');
+      await fetch('/api/dashboard/sync', { method: 'POST' });
+      clearAllClientCache();
+      setSyncEpoch((n) => n + 1);
     } finally {
-      setSyncing(false);
-    }
-  };
-
-  const handleToggleCampaignState = async (
-    targetCampaignId: string,
-    nextState: 'ACTIVE' | 'PAUSED',
-  ) => {
-    const res = await fetch(`/api/aimfox/campaigns/${encodeURIComponent(targetCampaignId)}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ state: nextState }),
-    });
-    if (!res.ok) {
-      const json = await res.json();
-      setError(json.error || 'Failed to update campaign state');
-      return;
-    }
-    await fetchOverview({ force: true, silent: true });
-  };
-
-  const handleTriggerTestWebhook = async (eventType = 'campaign_reply') => {
-    setTestingWebhook(true);
-    try {
-      await fetch('/api/webhooks/aimfox/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ event_type: eventType }),
-      });
-    } finally {
-      setTestingWebhook(false);
+      setTimeout(() => setSyncing(false), 350);
     }
   };
 
@@ -231,11 +162,23 @@ export default function App() {
     window.location.href = `/api/export/csv?${params.toString()}`;
   };
 
-  const currentTabLabel = NAV_ITEMS.find((i) => i.id === activeTab)?.label || 'Overview';
+  const currentPath = location.pathname;
+  const currentTabLabel =
+    NAV_ITEMS.find((item) => currentPath.startsWith(item.to))?.label || 'Overview';
+
+  const showRangeFilter =
+    currentPath.startsWith('/overview') || currentPath.startsWith('/users');
+  const showAccountFilter =
+    currentPath.startsWith('/overview') ||
+    currentPath.startsWith('/users') ||
+    currentPath.startsWith('/leads');
+  const showCampaignFilter =
+    currentPath.startsWith('/overview') ||
+    currentPath.startsWith('/campaigns') ||
+    currentPath.startsWith('/leads');
 
   return (
     <div className="min-h-screen flex bg-slate-50 text-slate-900">
-      {/* Mobile Sidebar Backdrop */}
       {mobileMenuOpen && (
         <div
           className="fixed inset-0 bg-slate-900/40 z-30 lg:hidden"
@@ -266,44 +209,42 @@ export default function App() {
 
           <div className="px-5 py-4 border-b border-slate-100">
             <div className="text-xs font-semibold text-slate-900 truncate">
-              {data?.customer.workspaceName || 'Baby George Creative'}
+              {meta?.customer.workspaceName || 'Baby George Creative'}
             </div>
             <div className="text-xs text-slate-500 truncate mt-0.5">
-              {data?.customer.fullName || 'Jason Thompson'}
+              {meta?.customer.fullName || 'Jason Thompson'}
             </div>
             <div className="text-[11px] text-slate-400 truncate">
-              {data?.customer.email || 'jason@aurorasalesagency.com'}
+              {meta?.customer.email || 'jason@aurorasalesagency.com'}
             </div>
           </div>
 
           <nav className="p-3 space-y-1" aria-label="Dashboard sections">
             {NAV_ITEMS.map((item) => {
               const Icon = item.icon;
-              const isActive = activeTab === item.id;
               return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => {
-                    setActiveTab(item.id);
-                    setMobileMenuOpen(false);
-                  }}
-                  className={`w-full flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
-                    isActive
-                      ? 'bg-slate-900 text-white'
-                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-                  }`}
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  onClick={() => setMobileMenuOpen(false)}
+                  className={({ isActive }) =>
+                    `w-full flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md transition-colors whitespace-nowrap ${
+                      isActive
+                        ? 'bg-slate-900 text-white'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                    }`
+                  }
                 >
                   <Icon className="w-4 h-4 shrink-0" />
                   <span>{item.label}</span>
-                </button>
+                </NavLink>
               );
             })}
           </nav>
         </div>
 
-        {/* Real Telemetry Footer (WS connection + Aimfox rate-limit budget) */}
-        <div className="p-4 border-t border-slate-200 space-y-2.5 text-xs">
+        {/* Real Telemetry & Cache Token Savings Footer */}
+        <div className="p-4 border-t border-slate-200 space-y-2 text-xs">
           <div className="flex items-center justify-between">
             <span className="text-slate-500">Real-Time Stream</span>
             <span className="inline-flex items-center gap-1.5 font-medium text-slate-800">
@@ -330,12 +271,16 @@ export default function App() {
           <div className="flex items-center justify-between font-mono tabular-nums text-slate-500">
             <span>API Budget</span>
             <span>
-              {data?.rateLimit.requestsLastMinute ?? 0}/{data?.rateLimit.limitPerMinute ?? 60} rpm
+              {meta?.cache.requestsLastMinute ?? 0}/{meta?.cache.limitPerMinute ?? 60} rpm
             </span>
           </div>
-          {data?.syncedAt && (
+          <div className="flex items-center justify-between font-mono tabular-nums text-emerald-700">
+            <span>Tokens Saved</span>
+            <span>{meta?.cache.tokensSavedEstimate ?? 0} cached</span>
+          </div>
+          {meta?.syncedAt && (
             <div className="text-[11px] font-mono tabular-nums text-slate-400">
-              Synced {new Date(data.syncedAt).toLocaleTimeString()}
+              {meta.cache.hit ? 'Cached' : 'Fresh'} · {new Date(meta.syncedAt).toLocaleTimeString()}
             </div>
           )}
         </div>
@@ -356,7 +301,7 @@ export default function App() {
             </button>
             <div className="flex items-center gap-2 text-sm truncate">
               <span className="text-slate-500 truncate">
-                {data?.customer.workspaceName || 'Baby George Creative'}
+                {meta?.customer.workspaceName || 'Baby George Creative'}
               </span>
               <span className="text-slate-300" aria-hidden="true">/</span>
               <h1 className="font-semibold text-slate-900 truncate">{currentTabLabel}</h1>
@@ -379,131 +324,156 @@ export default function App() {
         {/* Workspace Filter Toolbar */}
         <div className="bg-white border-b border-slate-200 px-6 py-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-3">
-            {/* Timeframe Segmented Control */}
-            <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-md" role="group" aria-label="Time range">
-              {(['7d', '30d', '90d'] as TimeRange[]).map((r) => (
-                <button
-                  key={r}
-                  type="button"
-                  onClick={() => setRange(r)}
-                  className={`px-3 py-1 text-xs font-mono font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    range === r
-                      ? 'bg-white text-slate-900 shadow-xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  {r.toUpperCase()}
-                </button>
-              ))}
-            </div>
+            {showRangeFilter && (
+              <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-md" role="group" aria-label="Time range">
+                {(['7d', '30d', '90d'] as TimeRange[]).map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    onClick={() => setRange(r)}
+                    className={`px-3 py-1 text-xs font-mono font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      range === r
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {r.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            )}
 
-            {/* User / Account Selector */}
-            <select
-              value={accountId}
-              onChange={(e) => setAccountId(e.target.value)}
-              aria-label="Filter by LinkedIn account"
-              className="px-3 py-1.5 text-xs font-medium border border-slate-200 rounded-md bg-white text-slate-800 focus:outline-none focus:border-teal-700"
-            >
-              <option value="all">All LinkedIn Seats</option>
-              {data?.accounts.map((acc) => (
-                <option key={acc.id} value={acc.id}>
-                  {acc.full_name}
-                </option>
-              ))}
-            </select>
+            {showAccountFilter && (
+              <select
+                value={accountId}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setAccountId(val);
+                  if (currentPath.startsWith('/users') && val !== 'all') {
+                    navigate(`/users/${val}`);
+                  } else if (currentPath.startsWith('/users') && val === 'all') {
+                    navigate('/users');
+                  }
+                }}
+                aria-label="Filter by LinkedIn account"
+                className="px-3 py-1.5 text-xs font-medium border border-slate-200 rounded-md bg-white text-slate-800 focus:outline-none focus:border-teal-700"
+              >
+                <option value="all">All LinkedIn Seats</option>
+                {meta?.accounts.map((acc) => (
+                  <option key={acc.id} value={acc.id}>
+                    {acc.full_name}
+                  </option>
+                ))}
+              </select>
+            )}
 
-            {/* Campaign Selector */}
-            <select
-              value={campaignId}
-              onChange={(e) => setCampaignId(e.target.value)}
-              aria-label="Filter by Campaign"
-              className="px-3 py-1.5 text-xs font-medium border border-slate-200 rounded-md bg-white text-slate-800 focus:outline-none focus:border-teal-700"
-            >
-              <option value="all">All Campaigns</option>
-              {data?.campaigns.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
+            {showCampaignFilter && (
+              <select
+                value={campaignId}
+                onChange={(e) => setCampaignId(e.target.value)}
+                aria-label="Filter by Campaign"
+                className="px-3 py-1.5 text-xs font-medium border border-slate-200 rounded-md bg-white text-slate-800 focus:outline-none focus:border-teal-700"
+              >
+                <option value="all">All Campaigns</option>
+                {meta?.campaigns.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
 
           <button
             type="button"
             onClick={handleExportCsv}
-            disabled={!data}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-md hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-md hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Download className="w-3.5 h-3.5" />
             <span>Export CSV</span>
           </button>
         </div>
 
-        {/* Main Viewport */}
+        {/* Route Viewport */}
         <main className="flex-1 p-6 max-w-[1380px] w-full mx-auto">
-          {error && (
-            <div className="mb-6 bg-red-50 border border-red-200 rounded-lg px-4 py-3 flex items-center justify-between gap-4 text-sm text-red-800">
-              <span>{error}</span>
-              <button
-                type="button"
-                onClick={() => fetchOverview({ force: true })}
-                className="px-3 py-1 text-xs font-medium bg-white border border-red-200 rounded hover:bg-red-100 cursor-pointer"
-              >
-                Retry
-              </button>
-            </div>
-          )}
-
-          {loading && !data ? (
-            <div className="space-y-6 animate-pulse">
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-                {[1, 2, 3, 4].map((n) => (
-                  <div key={n} className="h-24 bg-white border border-slate-200 rounded-lg" />
-                ))}
-              </div>
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                <div className="lg:col-span-8 h-80 bg-white border border-slate-200 rounded-lg" />
-                <div className="lg:col-span-4 h-80 bg-white border border-slate-200 rounded-lg" />
-              </div>
-            </div>
-          ) : data ? (
-            <>
-              {activeTab === 'overview' && (
-                <OverviewView
-                  data={data}
-                  onSelectAccount={(id) => {
-                    setAccountId(id);
-                    setActiveTab('users');
-                  }}
-                  onNavigate={(tab) => setActiveTab(tab)}
-                  onTriggerTestWebhook={() => handleTriggerTestWebhook('campaign_reply')}
-                  testingWebhook={testingWebhook}
+          <Routes>
+            <Route path="/" element={<Navigate to="/overview" replace />} />
+            <Route
+              path="/overview"
+              element={
+                <OverviewPage
+                  range={range}
+                  accountId={accountId}
+                  campaignId={campaignId}
+                  latestWebhook={latestWebhook}
+                  syncEpoch={syncEpoch}
+                  onMetaUpdate={handleMetaUpdate}
                 />
-              )}
-
-              {activeTab === 'users' && <UserPerformanceView data={data} />}
-
-              {activeTab === 'campaigns' && (
-                <CampaignsTemplatesView
-                  data={data}
-                  onToggleCampaignState={handleToggleCampaignState}
+              }
+            />
+            <Route
+              path="/users"
+              element={
+                <UsersPage
+                  range={range}
+                  syncEpoch={syncEpoch}
+                  onMetaUpdate={handleMetaUpdate}
                 />
-              )}
-
-              {activeTab === 'leads' && <LeadsConversationsView data={data} />}
-
-              {activeTab === 'webhooks' && (
-                <WebhooksVueView
-                  data={data}
-                  onRefresh={() => fetchOverview({ force: true, silent: true })}
-                  onTriggerTestWebhook={handleTriggerTestWebhook}
-                  testingWebhook={testingWebhook}
+              }
+            />
+            <Route
+              path="/users/:accountId"
+              element={
+                <UsersPage
+                  range={range}
+                  syncEpoch={syncEpoch}
+                  onMetaUpdate={handleMetaUpdate}
                 />
-              )}
-            </>
-          ) : null}
+              }
+            />
+            <Route
+              path="/campaigns"
+              element={
+                <CampaignsPage
+                  campaignIdFilter={campaignId}
+                  syncEpoch={syncEpoch}
+                  onMetaUpdate={handleMetaUpdate}
+                />
+              }
+            />
+            <Route
+              path="/leads"
+              element={
+                <LeadsPage
+                  accountIdFilter={accountId}
+                  campaignIdFilter={campaignId}
+                  syncEpoch={syncEpoch}
+                  onMetaUpdate={handleMetaUpdate}
+                />
+              }
+            />
+            <Route
+              path="/webhooks"
+              element={
+                <WebhooksPage
+                  latestWebhook={latestWebhook}
+                  syncEpoch={syncEpoch}
+                  onMetaUpdate={handleMetaUpdate}
+                />
+              }
+            />
+            <Route path="*" element={<Navigate to="/overview" replace />} />
+          </Routes>
         </main>
       </div>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <DashboardShell />
+    </BrowserRouter>
   );
 }

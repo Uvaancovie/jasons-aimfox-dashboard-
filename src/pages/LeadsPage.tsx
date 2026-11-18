@@ -1,20 +1,44 @@
-import { useState } from 'react';
-import type { AimfoxLead, DashboardOverviewResponse } from '../types/aimfox';
-import { Avatar } from './Avatar';
+import { useEffect, useState } from 'react';
+import type { AimfoxLead, LeadsPageResponse } from '../types/aimfox';
+import { Avatar } from '../components/Avatar';
+import { useCachedPage } from '../lib/swrCache';
 import { Search } from 'lucide-react';
 
-interface LeadsConversationsViewProps {
-  data: DashboardOverviewResponse;
+interface LeadsPageProps {
+  accountIdFilter: string;
+  campaignIdFilter: string;
+  syncEpoch: number;
+  onMetaUpdate: (meta: LeadsPageResponse) => void;
 }
 
-export function LeadsConversationsView({ data }: LeadsConversationsViewProps) {
+export function LeadsPage({
+  accountIdFilter,
+  campaignIdFilter,
+  syncEpoch,
+  onMetaUpdate,
+}: LeadsPageProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState<AimfoxLead[] | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [selectedConvUrn, setSelectedConvUrn] = useState<string>(
-    data.conversations[0]?.conversation_urn || '',
-  );
+  const [selectedConvUrn, setSelectedConvUrn] = useState<string>('');
+
+  const { data, loading, error, refresh } = useCachedPage<LeadsPageResponse>('/api/pages/leads');
+
+  useEffect(() => {
+    if (data) {
+      onMetaUpdate(data);
+      if (!selectedConvUrn && data.conversations[0]?.conversation_urn) {
+        setSelectedConvUrn(data.conversations[0].conversation_urn);
+      }
+    }
+  }, [data, onMetaUpdate, selectedConvUrn]);
+
+  useEffect(() => {
+    if (syncEpoch > 0) {
+      refresh({ force: true });
+    }
+  }, [syncEpoch, refresh]);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -36,13 +60,50 @@ export function LeadsConversationsView({ data }: LeadsConversationsViewProps) {
     }
   };
 
+  if (loading && !data) {
+    return (
+      <div className="space-y-6 animate-pulse">
+        <div className="h-64 bg-white border border-slate-200 rounded-lg" />
+        <div className="h-80 bg-white border border-slate-200 rounded-lg" />
+      </div>
+    );
+  }
+
+  if (error && !data) {
+    return (
+      <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 flex items-center justify-between gap-4 text-sm text-red-800">
+        <span>{error}</span>
+        <button
+          type="button"
+          onClick={() => refresh({ force: true })}
+          className="px-3 py-1 text-xs font-medium bg-white border border-red-200 rounded hover:bg-red-100 cursor-pointer"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (!data) return null;
+
+  const filteredRecentLeads = data.recentLeads.filter((lead) => {
+    if (
+      accountIdFilter !== 'all' &&
+      lead.account_id !== accountIdFilter &&
+      lead.owner !== accountIdFilter
+    ) {
+      return false;
+    }
+    if (campaignIdFilter !== 'all' && lead.campaign_id !== campaignIdFilter) return false;
+    return true;
+  });
+
   const selectedConversation =
     data.conversations.find((c) => c.conversation_urn === selectedConvUrn) ||
     data.conversations[0];
 
   return (
     <div className="space-y-6">
-      {/* Live Lead Search */}
       <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
         <div className="px-5 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-4">
           <div>
@@ -69,6 +130,18 @@ export function LeadsConversationsView({ data }: LeadsConversationsViewProps) {
             >
               {searching ? 'Searching...' : 'Search Leads'}
             </button>
+            {searchResults !== null && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchResults(null);
+                  setSearchQuery('');
+                }}
+                className="px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 cursor-pointer"
+              >
+                Reset
+              </button>
+            )}
           </form>
         </div>
 
@@ -96,9 +169,7 @@ export function LeadsConversationsView({ data }: LeadsConversationsViewProps) {
                       <div className="flex items-center gap-3 min-w-0">
                         <Avatar src={lead.picture_url} name={lead.full_name} size="sm" />
                         <div className="min-w-0">
-                          <div className="font-medium text-slate-900 truncate">
-                            {lead.full_name}
-                          </div>
+                          <div className="font-medium text-slate-900 truncate">{lead.full_name}</div>
                           <div className="text-xs text-slate-500 truncate max-w-md">
                             {lead.occupation || 'LinkedIn Member'}
                           </div>
@@ -140,7 +211,7 @@ export function LeadsConversationsView({ data }: LeadsConversationsViewProps) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 text-sm">
-                {data.recentLeads.map((lead) => (
+                {filteredRecentLeads.map((lead) => (
                   <tr key={`${lead.target_id}-${lead.timestamp}`} className="hover:bg-slate-50">
                     <td className="py-3 px-5">
                       <div className="flex items-center gap-3 min-w-0">
@@ -170,7 +241,6 @@ export function LeadsConversationsView({ data }: LeadsConversationsViewProps) {
         )}
       </div>
 
-      {/* Conversations Inbox */}
       <div className="bg-white border border-slate-200 rounded-lg overflow-hidden grid grid-cols-1 lg:grid-cols-12 min-h-[380px]">
         <div className="lg:col-span-5 border-b lg:border-b-0 lg:border-r border-slate-200 flex flex-col">
           <div className="px-5 py-4 border-b border-slate-200">
@@ -213,11 +283,6 @@ export function LeadsConversationsView({ data }: LeadsConversationsViewProps) {
                 </button>
               );
             })}
-            {data.conversations.length === 0 && (
-              <div className="p-8 text-center text-sm text-slate-500">
-                No conversations synced from Aimfox.
-              </div>
-            )}
           </div>
         </div>
 

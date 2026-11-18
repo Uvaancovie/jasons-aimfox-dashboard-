@@ -1,18 +1,23 @@
+import { useEffect, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import type {
-  DashboardOverviewResponse,
+  OverviewPageResponse,
   StoredWebhookEvent,
+  TimeRange,
 } from '../types/aimfox';
-import { Avatar } from './Avatar';
-import { ConversionFunnel } from './ConversionFunnel';
-import { OutreachChart } from './OutreachChart';
+import { Avatar } from '../components/Avatar';
+import { ConversionFunnel } from '../components/ConversionFunnel';
+import { OutreachChart } from '../components/OutreachChart';
+import { useCachedPage } from '../lib/swrCache';
 import { ArrowUpRight, Send } from 'lucide-react';
 
-interface OverviewViewProps {
-  data: DashboardOverviewResponse;
-  onSelectAccount: (accountId: string) => void;
-  onNavigate: (tab: 'users' | 'campaigns' | 'leads' | 'webhooks') => void;
-  onTriggerTestWebhook: () => Promise<void>;
-  testingWebhook: boolean;
+interface OverviewPageProps {
+  range: TimeRange;
+  accountId: string;
+  campaignId: string;
+  latestWebhook: StoredWebhookEvent | null;
+  syncEpoch: number;
+  onMetaUpdate: (meta: OverviewPageResponse) => void;
 }
 
 function formatTimeAgo(isoOrDate: string | number): string {
@@ -33,14 +38,100 @@ function describeWebhookEvent(evt: StoredWebhookEvent): string {
   return `${lead} · ${campaign}`;
 }
 
-export function OverviewView({
-  data,
-  onSelectAccount,
-  onNavigate,
-  onTriggerTestWebhook,
-  testingWebhook,
-}: OverviewViewProps) {
-  const { totals, buckets, userPerformance, recentLeads, webhookEvents, range } = data;
+export function OverviewPage({
+  range,
+  accountId,
+  campaignId,
+  latestWebhook,
+  syncEpoch,
+  onMetaUpdate,
+}: OverviewPageProps) {
+  const navigate = useNavigate();
+  const [testingWebhook, setTestingWebhook] = useState(false);
+
+  const url = `/api/pages/overview?range=${range}&accountId=${encodeURIComponent(accountId)}&campaignId=${encodeURIComponent(campaignId)}`;
+  const { data, loading, error, refresh, mutate } = useCachedPage<OverviewPageResponse>(url);
+
+  useEffect(() => {
+    if (data) onMetaUpdate(data);
+  }, [data, onMetaUpdate]);
+
+  useEffect(() => {
+    if (syncEpoch > 0) {
+      refresh({ force: true });
+    }
+  }, [syncEpoch, refresh]);
+
+  useEffect(() => {
+    if (!latestWebhook) return;
+    mutate((prev) => {
+      if (!prev) return prev;
+      if (prev.webhookEvents.some((e) => e.id === latestWebhook.id)) return prev;
+      return {
+        ...prev,
+        webhookEvents: [latestWebhook, ...prev.webhookEvents].slice(0, 200),
+      };
+    });
+  }, [latestWebhook, mutate]);
+
+  const handleTriggerTestWebhook = async () => {
+    setTestingWebhook(true);
+    try {
+      const res = await fetch('/api/webhooks/aimfox/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event_type: 'campaign_reply' }),
+      });
+      const json = (await res.json()) as { event?: StoredWebhookEvent };
+      if (res.ok && json.event) {
+        mutate((prev) => {
+          if (!prev) return prev;
+          if (prev.webhookEvents.some((e) => e.id === json.event!.id)) return prev;
+          return {
+            ...prev,
+            webhookEvents: [json.event!, ...prev.webhookEvents].slice(0, 200),
+          };
+        });
+      }
+    } finally {
+      setTestingWebhook(false);
+    }
+  };
+
+  if (loading && !data) {
+    return (
+      <div className="space-y-6 animate-pulse">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+          {[1, 2, 3, 4].map((n) => (
+            <div key={n} className="h-24 bg-white border border-slate-200 rounded-lg" />
+          ))}
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div className="lg:col-span-8 h-80 bg-white border border-slate-200 rounded-lg" />
+          <div className="lg:col-span-4 h-80 bg-white border border-slate-200 rounded-lg" />
+        </div>
+      </div>
+    );
+  }
+
+  if (error && !data) {
+    return (
+      <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 flex items-center justify-between gap-4 text-sm text-red-800">
+        <span>{error}</span>
+        <button
+          type="button"
+          onClick={() => refresh({ force: true })}
+          className="px-3 py-1 text-xs font-medium bg-white border border-red-200 rounded hover:bg-red-100 cursor-pointer"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (!data) return null;
+
+  const { totals, buckets, userPerformance, recentLeads, webhookEvents } = data;
   const rangeLabel = range === '7d' ? 'Last 7 Days' : range === '90d' ? 'Last 90 Days' : 'Last 30 Days';
 
   const kpis = [
@@ -72,13 +163,16 @@ export function OverviewView({
 
   return (
     <div className="space-y-6">
+      {error && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5 text-xs text-amber-800">
+          Showing cached metrics ({error})
+        </div>
+      )}
+
       {/* 4-column KPI strip */}
       <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         {kpis.map((kpi) => (
-          <div
-            key={kpi.label}
-            className="bg-white border border-slate-200 rounded-lg px-5 py-4"
-          >
+          <div key={kpi.label} className="bg-white border border-slate-200 rounded-lg px-5 py-4">
             <div className="text-xs font-medium text-slate-500">{kpi.label}</div>
             <div className={`mt-2 text-2xl font-semibold font-mono tabular-nums ${kpi.accent}`}>
               {kpi.value}
@@ -100,9 +194,8 @@ export function OverviewView({
         </div>
       </section>
 
-      {/* User Performance Table + Real-Time Webhook Event Stream */}
+      {/* User Performance Table + Real-Time Event Stream */}
       <section className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* User-Specific Performance */}
         <div className="lg:col-span-7 bg-white border border-slate-200 rounded-lg overflow-hidden">
           <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-4">
             <div>
@@ -111,14 +204,13 @@ export function OverviewView({
                 Per-seat LinkedIn outreach quota and conversion efficiency
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => onNavigate('users')}
-              className="inline-flex items-center gap-1 text-xs font-medium text-teal-700 hover:text-teal-800 whitespace-nowrap shrink-0 cursor-pointer"
+            <Link
+              to="/users"
+              className="inline-flex items-center gap-1 text-xs font-medium text-teal-700 hover:text-teal-800 whitespace-nowrap shrink-0"
             >
               <span>Detailed Seat View</span>
               <ArrowUpRight className="w-3.5 h-3.5" />
-            </button>
+            </Link>
           </div>
 
           <div className="overflow-x-auto">
@@ -139,7 +231,7 @@ export function OverviewView({
                   return (
                     <tr
                       key={row.account.id}
-                      onClick={() => onSelectAccount(row.account.id)}
+                      onClick={() => navigate(`/users/${row.account.id}`)}
                       className="hover:bg-slate-50 transition-colors cursor-pointer"
                     >
                       <td className="py-3 px-5">
@@ -150,7 +242,13 @@ export function OverviewView({
                               {row.account.full_name}
                             </div>
                             <div className="text-xs text-slate-500 truncate">
-                              <span className={isOnline ? 'text-emerald-700 font-medium' : 'text-amber-700 font-medium'}>
+                              <span
+                                className={
+                                  isOnline
+                                    ? 'text-emerald-700 font-medium'
+                                    : 'text-amber-700 font-medium'
+                                }
+                              >
                                 {isOnline ? 'Connected' : row.account.state}
                               </span>
                               <span aria-hidden="true"> · </span>
@@ -177,13 +275,6 @@ export function OverviewView({
                     </tr>
                   );
                 })}
-                {userPerformance.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="py-8 text-center text-sm text-slate-500">
-                      No LinkedIn accounts connected in this Aimfox workspace.
-                    </td>
-                  </tr>
-                )}
               </tbody>
             </table>
           </div>
@@ -200,7 +291,7 @@ export function OverviewView({
             </div>
             <button
               type="button"
-              onClick={onTriggerTestWebhook}
+              onClick={handleTriggerTestWebhook}
               disabled={testingWebhook}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
             >
@@ -215,9 +306,7 @@ export function OverviewView({
                 <div className="min-w-0">
                   <div className="text-xs font-medium text-slate-900 flex items-center gap-2">
                     <span className="font-mono text-teal-700">{evt.event_type}</span>
-                    {evt.is_test && (
-                      <span className="text-slate-400">· Test payload</span>
-                    )}
+                    {evt.is_test && <span className="text-slate-400">· Test payload</span>}
                   </div>
                   <div className="text-xs text-slate-600 mt-0.5 truncate">
                     {describeWebhookEvent(evt)}
@@ -266,13 +355,9 @@ export function OverviewView({
             <span className="text-slate-500 font-mono tabular-nums">
               {webhookEvents.length} webhook events stored
             </span>
-            <button
-              type="button"
-              onClick={() => onNavigate('webhooks')}
-              className="font-medium text-teal-700 hover:text-teal-800 cursor-pointer"
-            >
+            <Link to="/webhooks" className="font-medium text-teal-700 hover:text-teal-800">
               Configure Webhooks
-            </button>
+            </Link>
           </div>
         </div>
       </section>

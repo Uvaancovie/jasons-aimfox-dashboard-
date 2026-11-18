@@ -1,21 +1,67 @@
-import { useState } from 'react';
-import type { DashboardOverviewResponse } from '../types/aimfox';
-import { Avatar } from './Avatar';
-import { OutreachChart } from './OutreachChart';
+import { useEffect } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import type { TimeRange, UsersPageResponse } from '../types/aimfox';
+import { Avatar } from '../components/Avatar';
+import { OutreachChart } from '../components/OutreachChart';
+import { useCachedPage } from '../lib/swrCache';
 
-interface UserPerformanceViewProps {
-  data: DashboardOverviewResponse;
+interface UsersPageProps {
+  range: TimeRange;
+  syncEpoch: number;
+  onMetaUpdate: (meta: UsersPageResponse) => void;
 }
 
-export function UserPerformanceView({ data }: UserPerformanceViewProps) {
-  const { userPerformance, campaigns, range } = data;
-  const [selectedUserId, setSelectedUserId] = useState<string>(
-    userPerformance[0]?.account.id || '',
-  );
+export function UsersPage({ range, syncEpoch, onMetaUpdate }: UsersPageProps) {
+  const { accountId: routeAccountId } = useParams<{ accountId?: string }>();
+  const navigate = useNavigate();
 
+  const url = `/api/pages/users?range=${range}`;
+  const { data, loading, error, refresh } = useCachedPage<UsersPageResponse>(url);
+
+  useEffect(() => {
+    if (data) onMetaUpdate(data);
+  }, [data, onMetaUpdate]);
+
+  useEffect(() => {
+    if (syncEpoch > 0) {
+      refresh({ force: true });
+    }
+  }, [syncEpoch, refresh]);
+
+  if (loading && !data) {
+    return (
+      <div className="space-y-6 animate-pulse">
+        <div className="h-24 bg-white border border-slate-200 rounded-lg" />
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {[1, 2, 3].map((n) => (
+            <div key={n} className="h-32 bg-white border border-slate-200 rounded-lg" />
+          ))}
+        </div>
+        <div className="h-72 bg-white border border-slate-200 rounded-lg" />
+      </div>
+    );
+  }
+
+  if (error && !data) {
+    return (
+      <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 flex items-center justify-between gap-4 text-sm text-red-800">
+        <span>{error}</span>
+        <button
+          type="button"
+          onClick={() => refresh({ force: true })}
+          className="px-3 py-1 text-xs font-medium bg-white border border-red-200 rounded hover:bg-red-100 cursor-pointer"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (!data) return null;
+
+  const { userPerformance, campaigns } = data;
   const selectedUser =
-    userPerformance.find((u) => u.account.id === selectedUserId) || userPerformance[0];
-
+    userPerformance.find((u) => u.account.id === routeAccountId) || userPerformance[0];
   const rangeLabel = range === '7d' ? 'Last 7 Days' : range === '90d' ? 'Last 90 Days' : 'Last 30 Days';
 
   if (!selectedUser) {
@@ -29,7 +75,6 @@ export function UserPerformanceView({ data }: UserPerformanceViewProps) {
   const ownedCampaigns = campaigns.filter((c) =>
     c.owners?.includes(selectedUser.account.id),
   );
-
   const connectQuotaPct = Math.min(
     100,
     Math.round((selectedUser.todayConnections / Math.max(selectedUser.dailyConnectLimit, 1)) * 100),
@@ -43,7 +88,6 @@ export function UserPerformanceView({ data }: UserPerformanceViewProps) {
 
   return (
     <div className="space-y-6">
-      {/* Seat switcher bar when multiple seats exist */}
       <div className="bg-white border border-slate-200 rounded-lg p-5 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-4 min-w-0">
           <Avatar
@@ -84,7 +128,7 @@ export function UserPerformanceView({ data }: UserPerformanceViewProps) {
             <button
               key={row.account.id}
               type="button"
-              onClick={() => setSelectedUserId(row.account.id)}
+              onClick={() => navigate(`/users/${row.account.id}`)}
               className={`px-3 py-1.5 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 row.account.id === selectedUser.account.id
                   ? 'bg-slate-900 text-white border-slate-900'
@@ -97,7 +141,6 @@ export function UserPerformanceView({ data }: UserPerformanceViewProps) {
         </div>
       </div>
 
-      {/* User-specific metric breakdown */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-white border border-slate-200 rounded-lg p-5">
           <div className="text-xs font-medium text-slate-500">
@@ -112,10 +155,7 @@ export function UserPerformanceView({ data }: UserPerformanceViewProps) {
             </span>
           </div>
           <div className="mt-3 h-2 w-full bg-slate-100 rounded-sm overflow-hidden">
-            <div
-              className="h-full bg-teal-700 transition-all"
-              style={{ width: `${connectQuotaPct}%` }}
-            />
+            <div className="h-full bg-teal-700 transition-all" style={{ width: `${connectQuotaPct}%` }} />
           </div>
           <div className="mt-3 text-xs text-slate-500 font-mono tabular-nums">
             Warmup mode: {selectedUser.account.limits?.warmup?.enabled ? 'Enabled' : 'Off'}
@@ -133,10 +173,7 @@ export function UserPerformanceView({ data }: UserPerformanceViewProps) {
             </span>
           </div>
           <div className="mt-3 h-2 w-full bg-slate-100 rounded-sm overflow-hidden">
-            <div
-              className="h-full bg-slate-800 transition-all"
-              style={{ width: `${inmailQuotaPct}%` }}
-            />
+            <div className="h-full bg-slate-800 transition-all" style={{ width: `${inmailQuotaPct}%` }} />
           </div>
           <div className="mt-3 text-xs text-slate-500 font-mono tabular-nums">
             Window total: {selectedUser.totals.sent_inmails} InMails · {selectedUser.totals.inmail_replies} replies
@@ -167,10 +204,11 @@ export function UserPerformanceView({ data }: UserPerformanceViewProps) {
         </div>
       </div>
 
-      {/* Per-user chart */}
-      <OutreachChart buckets={selectedUser.buckets} rangeLabel={`${selectedUser.account.full_name} · ${rangeLabel}`} />
+      <OutreachChart
+        buckets={selectedUser.buckets}
+        rangeLabel={`${selectedUser.account.full_name} · ${rangeLabel}`}
+      />
 
-      {/* Campaigns owned by this seat */}
       <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
         <div className="px-5 py-4 border-b border-slate-200">
           <h3 className="text-base font-semibold text-slate-900">

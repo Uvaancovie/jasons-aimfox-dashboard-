@@ -1,37 +1,112 @@
-import { useState } from 'react';
-import type { AimfoxCampaign, DashboardOverviewResponse } from '../types/aimfox';
+import { useEffect, useState } from 'react';
+import type { AimfoxCampaign, CampaignsPageResponse } from '../types/aimfox';
+import { useCachedPage } from '../lib/swrCache';
 import { Pause, Play } from 'lucide-react';
 
-interface CampaignsTemplatesViewProps {
-  data: DashboardOverviewResponse;
-  onToggleCampaignState: (campaignId: string, nextState: 'ACTIVE' | 'PAUSED') => Promise<void>;
+interface CampaignsPageProps {
+  campaignIdFilter: string;
+  syncEpoch: number;
+  onMetaUpdate: (meta: CampaignsPageResponse) => void;
 }
 
-export function CampaignsTemplatesView({
-  data,
-  onToggleCampaignState,
-}: CampaignsTemplatesViewProps) {
+export function CampaignsPage({
+  campaignIdFilter,
+  syncEpoch,
+  onMetaUpdate,
+}: CampaignsPageProps) {
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [stateFilter, setStateFilter] = useState<'ALL' | 'ACTIVE' | 'PAUSED'>('ALL');
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  const filteredCampaigns = data.campaigns.filter((c) => {
-    if (stateFilter === 'ALL') return true;
-    return c.state === stateFilter;
-  });
+  const { data, loading, error, refresh, mutate } = useCachedPage<CampaignsPageResponse>(
+    '/api/pages/campaigns',
+  );
+
+  useEffect(() => {
+    if (data) onMetaUpdate(data);
+  }, [data, onMetaUpdate]);
+
+  useEffect(() => {
+    if (syncEpoch > 0) {
+      refresh({ force: true });
+    }
+  }, [syncEpoch, refresh]);
 
   const handleToggle = async (campaign: AimfoxCampaign) => {
     const nextState = campaign.state === 'ACTIVE' ? 'PAUSED' : 'ACTIVE';
     setUpdatingId(campaign.id);
+    setActionError(null);
+
+    // Optimistic update
+    mutate((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        campaigns: prev.campaigns.map((c) =>
+          c.id === campaign.id ? { ...c, state: nextState } : c,
+        ),
+      };
+    });
+
     try {
-      await onToggleCampaignState(campaign.id, nextState);
+      const res = await fetch(`/api/aimfox/campaigns/${encodeURIComponent(campaign.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state: nextState }),
+      });
+      if (!res.ok) {
+        const json = (await res.json()) as { error?: string };
+        throw new Error(json.error || 'Failed to update campaign state');
+      }
+      await refresh({ force: true, silent: true });
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to update campaign');
+      await refresh({ force: true, silent: true });
     } finally {
       setUpdatingId(null);
     }
   };
 
+  if (loading && !data) {
+    return (
+      <div className="space-y-6 animate-pulse">
+        <div className="h-64 bg-white border border-slate-200 rounded-lg" />
+        <div className="h-64 bg-white border border-slate-200 rounded-lg" />
+      </div>
+    );
+  }
+
+  if (error && !data) {
+    return (
+      <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 flex items-center justify-between gap-4 text-sm text-red-800">
+        <span>{error}</span>
+        <button
+          type="button"
+          onClick={() => refresh({ force: true })}
+          className="px-3 py-1 text-xs font-medium bg-white border border-red-200 rounded hover:bg-red-100 cursor-pointer"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (!data) return null;
+
+  const filteredCampaigns = data.campaigns.filter((c) => {
+    if (campaignIdFilter !== 'all' && c.id !== campaignIdFilter) return false;
+    if (stateFilter === 'ALL') return true;
+    return c.state === stateFilter;
+  });
+
   return (
     <div className="space-y-6">
-      {/* Campaigns Performance Matrix */}
+      {actionError && (
+        <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-xs text-red-800">
+          {actionError}
+        </div>
+      )}
+
       <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
         <div className="px-5 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-4">
           <div>
@@ -164,11 +239,10 @@ export function CampaignsTemplatesView({
         </div>
       </div>
 
-      {/* Template Performance Leaderboard */}
       <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
         <div className="px-5 py-4 border-b border-slate-200">
           <h2 className="text-base font-semibold text-slate-900">
-            Message Template Conversion Rates
+            Message Template Conversion Rates ({data.templates.length})
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
             Direct Aimfox template response ratios ranked by outbound volume
@@ -222,12 +296,6 @@ export function CampaignsTemplatesView({
               </div>
             );
           })}
-
-          {data.templates.length === 0 && (
-            <div className="p-8 text-center text-sm text-slate-500">
-              No message templates found in Aimfox.
-            </div>
-          )}
         </div>
       </div>
     </div>

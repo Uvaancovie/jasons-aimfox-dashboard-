@@ -1,12 +1,12 @@
-import { useState } from 'react';
-import type { DashboardOverviewResponse } from '../types/aimfox';
+import { useEffect, useState } from 'react';
+import type { StoredWebhookEvent, WebhooksPageResponse } from '../types/aimfox';
+import { useCachedPage } from '../lib/swrCache';
 import { Check, Copy, Plus, Send, Trash2 } from 'lucide-react';
 
-interface WebhooksVueViewProps {
-  data: DashboardOverviewResponse;
-  onRefresh: () => Promise<void>;
-  onTriggerTestWebhook: (eventType: string) => Promise<void>;
-  testingWebhook: boolean;
+interface WebhooksPageProps {
+  latestWebhook: StoredWebhookEvent | null;
+  syncEpoch: number;
+  onMetaUpdate: (meta: WebhooksPageResponse) => void;
 }
 
 const AVAILABLE_EVENTS = [
@@ -21,25 +21,55 @@ const AVAILABLE_EVENTS = [
   'account_logged_out',
 ];
 
-export function WebhooksVueView({
-  data,
-  onRefresh,
-  onTriggerTestWebhook,
-  testingWebhook,
-}: WebhooksVueViewProps) {
+export function WebhooksPage({
+  latestWebhook,
+  syncEpoch,
+  onMetaUpdate,
+}: WebhooksPageProps) {
+  const { data, loading, error, refresh, mutate } = useCachedPage<WebhooksPageResponse>(
+    '/api/pages/webhooks',
+  );
+
   const [name, setName] = useState('Aurora Real-Time Stream');
-  const [url, setUrl] = useState(data.webhookEndpointUrl);
+  const [url, setUrl] = useState('');
   const [selectedEvents, setSelectedEvents] = useState<string[]>([
     'campaign_reply',
     'accepted',
     'new_connection',
     'account_logged_out',
   ]);
-  const [includeAuthHeader, setIncludeAuthHeader] = useState(data.webhookSecretConfigured);
+  const [includeAuthHeader, setIncludeAuthHeader] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [testingWebhook, setTestingWebhook] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [testEventType, setTestEventType] = useState('campaign_reply');
   const [copiedBlock, setCopiedBlock] = useState<'url' | 'vue' | null>(null);
+
+  useEffect(() => {
+    if (data) {
+      onMetaUpdate(data);
+      if (!url) setUrl(data.webhookEndpointUrl);
+      setIncludeAuthHeader(data.webhookSecretConfigured);
+    }
+  }, [data, onMetaUpdate, url]);
+
+  useEffect(() => {
+    if (syncEpoch > 0) {
+      refresh({ force: true });
+    }
+  }, [syncEpoch, refresh]);
+
+  useEffect(() => {
+    if (!latestWebhook) return;
+    mutate((prev) => {
+      if (!prev) return prev;
+      if (prev.webhookEvents.some((e) => e.id === latestWebhook.id)) return prev;
+      return {
+        ...prev,
+        webhookEvents: [latestWebhook, ...prev.webhookEvents].slice(0, 200),
+      };
+    });
+  }, [latestWebhook, mutate]);
 
   const toggleEvent = (evt: string) => {
     setSelectedEvents((prev) =>
@@ -64,7 +94,7 @@ export function WebhooksVueView({
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || 'Failed to register webhook');
-      await onRefresh();
+      await refresh({ force: true, silent: true });
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Failed to create webhook');
     } finally {
@@ -73,21 +103,41 @@ export function WebhooksVueView({
   };
 
   const handleDeleteWebhook = async (id: string) => {
+    const res = await fetch(`/api/aimfox/webhooks/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+    if (res.ok) {
+      await refresh({ force: true, silent: true });
+    }
+  };
+
+  const handleTriggerTestWebhook = async () => {
+    setTestingWebhook(true);
     try {
-      const res = await fetch(`/api/aimfox/webhooks/${encodeURIComponent(id)}`, {
-        method: 'DELETE',
+      const res = await fetch('/api/webhooks/aimfox/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event_type: testEventType }),
       });
-      if (res.ok) {
-        await onRefresh();
+      const json = (await res.json()) as { event?: StoredWebhookEvent };
+      if (res.ok && json.event) {
+        mutate((prev) => {
+          if (!prev) return prev;
+          if (prev.webhookEvents.some((e) => e.id === json.event!.id)) return prev;
+          return {
+            ...prev,
+            webhookEvents: [json.event!, ...prev.webhookEvents].slice(0, 200),
+          };
+        });
       }
-    } catch {
-      // handled silently via refresh
+    } finally {
+      setTestingWebhook(false);
     }
   };
 
   const handleClearLog = async () => {
     await fetch('/api/webhooks/events', { method: 'DELETE' });
-    await onRefresh();
+    mutate((prev) => (prev ? { ...prev, webhookEvents: [] } : prev));
   };
 
   const copyText = (text: string, key: 'url' | 'vue') => {
@@ -96,44 +146,67 @@ export function WebhooksVueView({
     setTimeout(() => setCopiedBlock(null), 1800);
   };
 
+  if (loading && !data) {
+    return (
+      <div className="space-y-6 animate-pulse">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div className="lg:col-span-6 h-80 bg-white border border-slate-200 rounded-lg" />
+          <div className="lg:col-span-6 h-80 bg-white border border-slate-200 rounded-lg" />
+        </div>
+      </div>
+    );
+  }
+
+  if (error && !data) {
+    return (
+      <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 flex items-center justify-between gap-4 text-sm text-red-800">
+        <span>{error}</span>
+        <button
+          type="button"
+          onClick={() => refresh({ force: true })}
+          className="px-3 py-1 text-xs font-medium bg-white border border-red-200 rounded hover:bg-red-100 cursor-pointer"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (!data) return null;
+
   const vueSnippet = `<script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 
-// Connects to your Express/Node Aimfox proxy & WebSocket stream
+// Connects to this Express/Vercel Aimfox cached proxy & webhook stream
 // Workspace: ${data.customer.workspaceName} (${data.customer.workspaceId})
 const overview = ref<any>(null)
 const liveEvents = ref<any[]>([])
 const selectedAccountId = ref('all')
-let ws: WebSocket | null = null
+let pollTimer: ReturnType<typeof setInterval> | null = null
 
 async function fetchMetrics() {
-  const res = await fetch(\`/api/dashboard/overview?range=30d&accountId=\${selectedAccountId.value}\`)
+  const res = await fetch(\`/api/pages/overview?range=30d&accountId=\${selectedAccountId.value}\`)
   overview.value = await res.json()
   liveEvents.value = overview.value.webhookEvents || []
 }
 
 onMounted(async () => {
   await fetchMetrics()
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  ws = new WebSocket(\`\${proto}//\${location.host}/ws\`)
-  ws.onmessage = (msg) => {
-    const { type, payload } = JSON.parse(msg.data)
-    if (type === 'webhook:received') {
-      liveEvents.value = [payload, ...liveEvents.value].slice(0, 50)
-    } else if (type === 'dashboard:synced') {
-      fetchMetrics()
-    }
-  }
+  pollTimer = setInterval(async () => {
+    const res = await fetch('/api/webhooks/events')
+    const data = await res.json()
+    liveEvents.value = data.events || []
+  }, 10000)
 })
 
-onUnmounted(() => ws?.close())
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
+})
 </script>`;
 
   return (
     <div className="space-y-6">
-      {/* Live Endpoint + Registration Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Register Webhook on Aimfox v3 */}
         <div className="lg:col-span-6 bg-white border border-slate-200 rounded-lg p-5">
           <h2 className="text-base font-semibold text-slate-900">
             Aimfox v3 Webhook Receiver
@@ -151,7 +224,11 @@ onUnmounted(() => ws?.close())
               onClick={() => copyText(data.webhookEndpointUrl, 'url')}
               className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded hover:bg-slate-100 shrink-0 cursor-pointer"
             >
-              {copiedBlock === 'url' ? <Check className="w-3.5 h-3.5 text-emerald-700" /> : <Copy className="w-3.5 h-3.5" />}
+              {copiedBlock === 'url' ? (
+                <Check className="w-3.5 h-3.5 text-emerald-700" />
+              ) : (
+                <Copy className="w-3.5 h-3.5" />
+              )}
               <span>{copiedBlock === 'url' ? 'Copied' : 'Copy URL'}</span>
             </button>
           </div>
@@ -278,7 +355,6 @@ onUnmounted(() => ws?.close())
           )}
         </div>
 
-        {/* Live Deduplicated Webhook Event Log */}
         <div className="lg:col-span-6 bg-white border border-slate-200 rounded-lg flex flex-col">
           <div className="px-5 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
             <div>
@@ -286,7 +362,7 @@ onUnmounted(() => ws?.close())
                 Live Ingestion Inspector
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Idempotent payload log broadcast via WebSocket
+                Idempotent payload log synced in real time
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -305,7 +381,7 @@ onUnmounted(() => ws?.close())
               <button
                 type="button"
                 disabled={testingWebhook}
-                onClick={() => onTriggerTestWebhook(testEventType)}
+                onClick={handleTriggerTestWebhook}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-teal-700 text-white rounded-md hover:bg-teal-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
               >
                 <Send className="w-3.5 h-3.5" />
@@ -349,7 +425,6 @@ onUnmounted(() => ws?.close())
         </div>
       </div>
 
-      {/* Vue.js 3 Composition API Companion Code */}
       <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
         <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-4">
           <div>
@@ -357,7 +432,7 @@ onUnmounted(() => ws?.close())
               Vue 3 Real-Time Client Integration
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Drop-in Vue 3 Composition API composable wired to this backend&apos;s Aimfox proxy and WebSocket feed
+              Drop-in Vue 3 Composition API composable wired to this cached Aimfox backend
             </p>
           </div>
           <button
@@ -365,7 +440,11 @@ onUnmounted(() => ws?.close())
             onClick={() => copyText(vueSnippet, 'vue')}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md whitespace-nowrap shrink-0 cursor-pointer"
           >
-            {copiedBlock === 'vue' ? <Check className="w-3.5 h-3.5 text-emerald-700" /> : <Copy className="w-3.5 h-3.5" />}
+            {copiedBlock === 'vue' ? (
+              <Check className="w-3.5 h-3.5 text-emerald-700" />
+            ) : (
+              <Copy className="w-3.5 h-3.5" />
+            )}
             <span>{copiedBlock === 'vue' ? 'Copied Vue Code' : 'Copy Vue Snippet'}</span>
           </button>
         </div>

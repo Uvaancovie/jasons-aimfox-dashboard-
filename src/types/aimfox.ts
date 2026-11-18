@@ -188,13 +188,69 @@ export interface UserPerformanceRow {
   buckets: InteractionBucket[];
 }
 
-export interface DashboardOverviewResponse {
-  customer: {
-    fullName: string;
-    email: string;
-    workspaceName: string;
-    workspaceId: string;
+export interface CustomerProfile {
+  fullName: string;
+  email: string;
+  workspaceName: string;
+  workspaceId: string;
+}
+
+export interface CacheTelemetry {
+  hit: boolean;
+  staleRevalidating?: boolean;
+  ageSeconds: number;
+  requestsLastMinute: number;
+  limitPerMinute: number;
+  tokensSavedEstimate?: number;
+}
+
+export interface BasePageResponse {
+  customer: CustomerProfile;
+  syncedAt: string;
+  cache: CacheTelemetry;
+  accounts: AimfoxAccount[];
+  campaigns: AimfoxCampaign[];
+}
+
+export interface OverviewPageResponse extends BasePageResponse {
+  range: TimeRange;
+  accountId: string;
+  campaignId: string;
+  buckets: InteractionBucket[];
+  totals: CampaignMetrics & {
+    acceptanceRate: number;
+    replyRate: number;
+    totalTargets: number;
+    unreadConversations: number;
   };
+  userPerformance: UserPerformanceRow[];
+  recentLeads: RecentLeadEvent[];
+  webhookEvents: StoredWebhookEvent[];
+}
+
+export interface UsersPageResponse extends BasePageResponse {
+  range: TimeRange;
+  userPerformance: UserPerformanceRow[];
+}
+
+export interface CampaignsPageResponse extends BasePageResponse {
+  templates: AimfoxTemplate[];
+}
+
+export interface LeadsPageResponse extends BasePageResponse {
+  recentLeads: RecentLeadEvent[];
+  conversations: AimfoxConversation[];
+}
+
+export interface WebhooksPageResponse extends BasePageResponse {
+  webhookEndpointUrl: string;
+  webhookSecretConfigured: boolean;
+  webhooks: AimfoxWebhookConfig[];
+  webhookEvents: StoredWebhookEvent[];
+}
+
+export interface DashboardOverviewResponse {
+  customer: CustomerProfile;
   range: TimeRange;
   accountId: string;
   campaignId: string;
