@@ -1,0 +1,6 @@
+{
+  "name": "Aurora Pulse — Aimfox Real-Time Analytics",
+  "description": "Real-time LinkedIn outreach analytics, user-specific performance metrics, campaign funnels, and webhook event streaming for Baby George Creative.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
