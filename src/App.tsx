@@ -41,7 +41,7 @@ export default function App() {
   const [syncing, setSyncing] = useState<boolean>(false);
   const [testingWebhook, setTestingWebhook] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-  const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'reconnecting'>('connecting');
+  const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'polling' | 'reconnecting'>('connecting');
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
 
   const rangeRef = useRef(range);
@@ -79,14 +79,32 @@ export default function App() {
     fetchOverview();
   }, [range, accountId, campaignId, fetchOverview]);
 
-  // Real-time WebSocket stream with automatic reconnection
+  // Real-time stream: uses WebSocket on Node server, clean HTTP polling on serverless (Vercel)
   useEffect(() => {
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
     let closedByCleanup = false;
     let attempt = 0;
 
-    const connect = () => {
+    const startPolling = () => {
+      setWsStatus('polling');
+      pollTimer = setInterval(async () => {
+        if (closedByCleanup) return;
+        try {
+          const res = await fetch('/api/webhooks/events');
+          if (!res.ok) return;
+          const json = (await res.json()) as { events?: StoredWebhookEvent[] };
+          if (Array.isArray(json.events)) {
+            setData((prev) => (prev ? { ...prev, webhookEvents: json.events! } : prev));
+          }
+        } catch {
+          // ignore transient poll failures
+        }
+      }, 10_000);
+    };
+
+    const connectWs = () => {
       if (closedByCleanup) return;
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       ws = new WebSocket(`${proto}//${window.location.host}/ws`);
@@ -128,15 +146,33 @@ export default function App() {
         setWsStatus('reconnecting');
         const delay = Math.min(10000, 1000 * Math.pow(1.6, attempt));
         attempt += 1;
-        reconnectTimer = setTimeout(connect, delay);
+        reconnectTimer = setTimeout(connectWs, delay);
       };
     };
 
-    connect();
+    (async () => {
+      try {
+        const res = await fetch('/api/health');
+        if (!res.ok) {
+          startPolling();
+          return;
+        }
+        const health = (await res.json()) as { wsSupported?: boolean };
+        if (closedByCleanup) return;
+        if (health.wsSupported) {
+          connectWs();
+        } else {
+          startPolling();
+        }
+      } catch {
+        if (!closedByCleanup) startPolling();
+      }
+    })();
 
     return () => {
       closedByCleanup = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (pollTimer) clearInterval(pollTimer);
       ws?.close();
     };
   }, [fetchOverview]);
@@ -273,7 +309,7 @@ export default function App() {
             <span className="inline-flex items-center gap-1.5 font-medium text-slate-800">
               <span
                 className={`w-2 h-2 rounded-full ${
-                  wsStatus === 'connected'
+                  wsStatus === 'connected' || wsStatus === 'polling'
                     ? 'bg-emerald-600'
                     : wsStatus === 'reconnecting'
                       ? 'bg-amber-600'
@@ -282,10 +318,12 @@ export default function App() {
               />
               <span>
                 {wsStatus === 'connected'
-                  ? 'Connected'
-                  : wsStatus === 'reconnecting'
-                    ? 'Reconnecting'
-                    : 'Connecting'}
+                  ? 'WebSocket Live'
+                  : wsStatus === 'polling'
+                    ? 'Live Polling (10s)'
+                    : wsStatus === 'reconnecting'
+                      ? 'Reconnecting'
+                      : 'Connecting'}
               </span>
             </span>
           </div>

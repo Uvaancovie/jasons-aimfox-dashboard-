@@ -35,7 +35,7 @@ export function WebhooksVueView({
     'new_connection',
     'account_logged_out',
   ]);
-  const [includeAuthHeader, setIncludeAuthHeader] = useState(true);
+  const [includeAuthHeader, setIncludeAuthHeader] = useState(data.webhookSecretConfigured);
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [testEventType, setTestEventType] = useState('campaign_reply');
@@ -209,15 +209,26 @@ onUnmounted(() => ws?.close())
               </div>
             </div>
 
-            <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+            <label
+              className={`flex items-center gap-2 text-xs ${
+                data.webhookSecretConfigured ? 'text-slate-700 cursor-pointer' : 'text-slate-400'
+              }`}
+            >
               <input
                 type="checkbox"
-                checked={includeAuthHeader}
+                checked={data.webhookSecretConfigured && includeAuthHeader}
+                disabled={!data.webhookSecretConfigured}
                 onChange={(e) => setIncludeAuthHeader(e.target.checked)}
                 className="rounded border-slate-300 text-teal-700 focus:ring-teal-700"
               />
               <span>
-                Attach server <code className="font-mono">Authorization: Bearer</code> header
+                {data.webhookSecretConfigured ? (
+                  <>
+                    Attach server <code className="font-mono">Authorization: Bearer</code> header
+                  </>
+                ) : (
+                  'Optional Authentication Header skipped (no AIMFOX_WEBHOOK_SECRET set — endpoint accepts Aimfox events openly)'
+                )}
               </span>
             </label>
 
